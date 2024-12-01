@@ -97,16 +97,26 @@ class G01Agent():
     def get_epsilon_greedy_action(self, S: list[list[int]], P: int) -> int:
         possible_action_list = self.get_all_possible_actions(S, P)
         possible_action_Q_values_list = self.get_all_Q_values_of_actions(S, P,  possible_action_list)
+
         max_Q_value = max(possible_action_Q_values_list)
-        max_Q_value_indices = [i for i in range(len(possible_action_Q_values_list)) if possible_action_Q_values_list[i] == max_Q_value]
-        not_max_Q_value_indices = [i for i in range(len(possible_action_Q_values_list)) if possible_action_Q_values_list[i] != max_Q_value]
-        num_max_Q_values = len(max_Q_value_indices)
-        num_remaining_Q_values = len(not_max_Q_value_indices)
+        max_Q_value_actions = list()
+        i = 0
+        for x in possible_action_Q_values_list:
+            if x == max_Q_value:
+                max_Q_value_actions.append(possible_action_list[i])
+            i += 1
+
+        num_max_Q_value_actions = len(max_Q_value_actions)
+        num_total_actions = len(possible_action_list)
         unit_rand = random.uniform(0, 1)
-        
+        if unit_rand > 1-self._epsilon:
+            action_idx = random.randint(0, num_total_actions-1)
+            action_chosen = possible_action_list[action_idx]
+        else:
+            action_idx = random.randint(0, num_max_Q_value_actions-1)
+            action_chosen = max_Q_value_actions[action_idx]
 
-
-        return(0)
+        return(action_chosen)
 
     def select_action_dumb_agent(self, env_observation, env_reward, env_termination, env_truncation, env_info) -> int:
         number_of_valid_moves = np.count_nonzero(env_info["action_mask"] == 1)
