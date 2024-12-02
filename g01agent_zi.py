@@ -18,7 +18,7 @@ from tensorflow.python.keras.metrics import TruePositives
 from ourhexenv import OurHexGame
 
 class G01Agent():
-    def __init__(self, game_env, agent_selector=1):
+    def __init__(self, game_env, agent_selector=1, sparse_flag=True):
         super().__init__()
         self._env = game_env
         self._board_size = 11 * 11
@@ -35,6 +35,8 @@ class G01Agent():
         self._initial_state = True
 
         self._actions_taken = 0
+
+        self._env_sparse_rewards = sparse_flag
 
     def select_action(self, env_observation, env_reward, env_termination, env_truncation, env_info):
         if self._agent_selector == 0:
@@ -182,12 +184,21 @@ class G01Agent():
         return(self._former_action_A)
 
     def load_past_experience(self) -> bool:
-        path = './basic_agent_experience_01.json'
+
+        if self._env_sparse_rewards == False:
+            path = './basic_agent_experience_01.json'
+        else:
+            path = './basic_agent_experience_sparse_01.json'
+
         path_obj = Path(path)
         ret_val = False
         if path_obj.exists():
-            experience_file_json = open("./basic_agent_experience_01.json", "r")
-            self._Q_value_table = json.load(experience_file_json)
+            experience_file_json = open(path, "r")
+            tmp_Q_value_table = json.load(experience_file_json)
+            for state_keys in tmp_Q_value_table.keys():
+                for act_str_keys in tmp_Q_value_table[state_keys].keys():
+                    self._Q_value_table[state_keys] = dict()
+                    self._Q_value_table[state_keys][int(act_str_keys)] = tmp_Q_value_table[state_keys][act_str_keys]
             experience_file_json.close()
             ret_val = True
         else:
@@ -196,6 +207,12 @@ class G01Agent():
 
     def store_past_experience(self):
         json_object = json.dumps(self._Q_value_table, indent = 4)
-        with open("./basic_agent_experience_01.json", "w") as outfile:
+
+        if self._env_sparse_rewards == False:
+            path = './basic_agent_experience_01.json'
+        else:
+            path = './basic_agent_experience_sparse_01.json'
+
+        with open(path, "w") as outfile:
             outfile.write(json_object)
         pass
