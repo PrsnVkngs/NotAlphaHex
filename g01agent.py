@@ -1,2 +1,7 @@
 class G01Agent:
-    pass
+    """
+    Implementing Monte Carlo Tree Search Algorithm
+    """
+    def __init__(self, env):
+        self.env = env
+

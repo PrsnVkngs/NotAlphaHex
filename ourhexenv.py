@@ -80,7 +80,7 @@ class UnionFind:
 
 
 class OurHexGame(AECEnv):
-    metadata = {"render_modes": ["human"]}
+    metadata = {"render_modes": ["human", "training"]}
 
     def __init__(self, board_size=11, sparse_flag=True, render_mode="human"):
         super().__init__()
@@ -106,7 +106,7 @@ class OurHexGame(AECEnv):
             True  # Tracks whether the pie rule is available for a user
         )
         self.is_pie_rule_used = (
-            False  # Tracks wheteher the pie rule has been activated by pie rule 2
+            False  # Tracks whether the pie rule has been activated by pie rule 2
         )
         self.board = np.zeros((self.board_size, self.board_size), dtype=int)
 
@@ -444,3 +444,7 @@ class OurHexGame(AECEnv):
         if self.window is not None:
             self.window = None
             self.clock = None
+
+    @property
+    def cumulative_rewards(self):
+        return self._cumulative_rewards

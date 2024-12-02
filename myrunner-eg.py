@@ -1,5 +1,5 @@
 from ourhexenv import OurHexGame
-from g01agent import G01Agent
+from g01agent_oskar import G01Agent
 from g99agent import G99Agent
 import random
 
