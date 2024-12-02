@@ -1,247 +1,238 @@
-import copy
-import math
-import time
-import random
-
-import torch
-import torch.nn as nn
-import torch.optim as optim
-import torch.nn.functional as F
-
+# Hyperparameters
 import numpy as np
 
 from ourhexenv import OurHexGame
 
-# MCTS HYPER PARAMETERS
-EXPLORE_CONSTANT = 1.41
-SEARCH_TIME = 1
+BOARD_SIZE = 11
+LEARNING_RATE = 1e-4
+BATCH_SIZE = 32
+GAMMA = 0.99
+REPLAY_MEMORY_SIZE = 10000
+NUM_CNN_CHANNELS = 64
+LSTM_HIDDEN_SIZE = 256
+FC_HIDDEN_SIZE = 128
+EPS_START = 0.9
+EPS_END = 0.05
+EPS_DECAY = 1000
+TARGET_UPDATE_FREQ = 10
+CHECKPOINT_FREQ = 1000
+CHECKPOINT_DIR = 'checkpoints'
 
-# CNN HYPER PARAMETERS
-PADDING = 1
-STRIDE = 1
-KERNEL_SIZE = 3
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
 
+import math
+import random
+import os
+from collections import deque, namedtuple
 
-def is_terminal(env: OurHexGame):
-    return any(env.terminations.values())
+Transition = namedtuple('Transition',
+    ('state', 'action', 'next_state', 'reward', 'terminated'))
 
-def get_valid_actions(env: OurHexGame):
-    action_mask = env.generate_info(env.agent_selection)['action_mask']
-    valid_actions = []
-    for i in range(len(action_mask)):
-        if action_mask[i] == 1:
-            valid_actions.append(i)
+class HexNet(nn.Module):
+    def __init__(self, board_size, num_channels=NUM_CNN_CHANNELS):
+        super(HexNet, self).__init__()
+        self.board_size = board_size
 
-    return valid_actions
+        # CNN layers for pattern recognition
+        self.conv1 = nn.Conv2d(1, num_channels, 3, padding=1)
+        self.conv2 = nn.Conv2d(num_channels, num_channels, 3, padding=1)
+        self.conv3 = nn.Conv2d(num_channels, num_channels, 3, padding=1)
 
-dc = copy.deepcopy
+        self.bn1 = nn.BatchNorm2d(num_channels)
+        self.bn2 = nn.BatchNorm2d(num_channels)
+        self.bn3 = nn.BatchNorm2d(num_channels)
 
-def clone_env(env: OurHexGame):
-    new_env = OurHexGame(env.board_size, env.sparse_flag, "dont_render")
-    new_env.board = dc(env.board)
-    new_env.agents = dc(env.agents)
-    new_env.agent_selection = dc(env.agent_selection)
-    new_env.agent_selector = dc(env.agent_selector)
-    new_env.is_first = dc(env.is_first)
-    new_env.is_pie_rule_usable = dc(env.is_pie_rule_usable)
-    new_env.is_pie_rule_used = dc(env.is_pie_rule_used)
-    new_env.dones = dc(env.dones)
-    new_env.infos = dc(env.infos)
-    new_env._cumulative_rewards = dc(env.cumulative_rewards)
-    new_env.terminations = dc(env.terminations)
-    new_env.truncations = dc(env.truncations)
-    new_env.rewards = dc(env.rewards)
+        self.lstm = nn.LSTM(
+            input_size=num_channels * board_size * board_size,
+            hidden_size=LSTM_HIDDEN_SIZE,
+            num_layers=1,
+            batch_first=True
+        )
 
-    return new_env
+        self.fc1 = nn.Linear(LSTM_HIDDEN_SIZE, FC_HIDDEN_SIZE)
+        self.fc2 = nn.Linear(FC_HIDDEN_SIZE, board_size * board_size + 1)
 
+    def forward(self, x):
+        batch_size = x.size(0)
+        if len(x.shape) == 3:
+            x = x.unsqueeze(1)
 
-class HexCNN(nn.Module):
-    def __init__(self):
-        super(HexCNN, self).__init__()
-        self.conv1 = nn.Conv2d(1, 64, kernel_size=KERNEL_SIZE, padding=PADDING, stride=STRIDE)
-        self.conv2 = nn.Conv2d(64, 128, kernel_size=KERNEL_SIZE, padding=PADDING, stride=STRIDE)
-        self.conv3 = nn.Conv2d(128, 128, kernel_size=KERNEL_SIZE, padding=PADDING, stride=STRIDE)
-        self.fc1 = nn.Linear(128 * 11 * 11 + 1, 512)
-        self.fc2 = nn.Linear(512, 122)  # 11x11 board
+        x = F.relu(self.bn1(self.conv1(x)))
+        x = F.relu(self.bn2(self.conv2(x)))
+        x = F.relu(self.bn3(self.conv3(x)))
 
-    def forward(self, x, pie_rule_flag):
-        x = F.relu(self.conv1(x))
-        x = F.relu(self.conv2(x))
-        x = F.relu(self.conv3(x))
-        x = x.view(-1, 128 * 11 * 11)
-        x = torch.cat([x, pie_rule_flag.unsqueeze(1)], dim=1)
+        x = x.view(batch_size, 1, -1)
+        x, _ = self.lstm(x)
+        x = x[:, -1, :]
         x = F.relu(self.fc1(x))
         x = self.fc2(x)
-        return F.softmax(x, dim=1)
+
+        return x
 
 
-class MCTSNode:
-    def __init__(self, board_state, env: OurHexGame, parent=None, action=None):
-        self.env = env
-        self.board_state = board_state
-        self.parent = parent
-        self.action = action
-        self.children = {}
-        self.visits = 0
-        self.value = 0
-        self.untried_actions = get_valid_actions(self.env)
+class ReplayMemory:
+    def __init__(self, capacity):
+        self.memory = deque([], maxlen=capacity)
 
-    def select_child(self):
-        return max(self.children.values(), key=lambda c: c.ucb_score())
+    def push(self, state, action, next_state, reward, terminated):
+        """Save a transition"""
+        self.memory.append(Transition(state, action, next_state, reward, terminated))
 
-    def ucb_score(self):
-        if self.visits == 0:
-            return float('inf')
-        return (self.value / self.visits) + (EXPLORE_CONSTANT * math.sqrt(math.log(self.parent.visits) / self.visits))
+    def sample(self, batch_size):
+        """Random sample a batch of transitions"""
+        return random.sample(self.memory, batch_size)
 
-    def expand(self):
-        if len(self.untried_actions) > 0:
-            action = self.untried_actions.pop()
+    def __len__(self):
+        return len(self.memory)
+
+
+class HexAgent:
+    def __init__(self, board_size, device, load_checkpoint=None):
+        self.device = device
+        self.board_size = board_size
+        self.policy_net = HexNet(board_size).to(device)
+        self.target_net = HexNet(board_size).to(device)
+
+        if load_checkpoint:
+            self.load_checkpoint(load_checkpoint)
         else:
-            return None
-        action_mask = self.env.generate_info(self.env.agent_selection)['action_mask']
-        try:
-            while action_mask[action] == 0:
-                action = self.untried_actions.pop()
-        except IndexError:
-            return None
+            self.target_net.load_state_dict(self.policy_net.state_dict())
 
-        next_state = clone_env(self.env)
-        next_state.step(action)
-        child_node = MCTSNode(next_state, next_state, parent=self, action=action)
-        self.children[action] = child_node
-        return child_node
+        self.optimizer = torch.optim.AdamW(self.policy_net.parameters(),
+                                           lr=LEARNING_RATE, amsgrad=True)
+        self.memory = ReplayMemory(REPLAY_MEMORY_SIZE)
 
-    def simulate(self, model):
-        current_env_clone = clone_env(self.env)
-        old_reward = current_env_clone.rewards[current_env_clone.agent_selection]
-        while not is_terminal(current_env_clone):
-            board = torch.tensor(current_env_clone.board).unsqueeze(0).unsqueeze(0).float().cuda()
-            pie_rule = torch.tensor([current_env_clone.is_pie_rule_used]).float().cuda()
-            action_probs = model(board, pie_rule).squeeze().detach().cpu().numpy()
-            valid_actions = get_valid_actions(current_env_clone)
+        self.steps_done = 0
+        self.episodes_done = 0
 
-            if not valid_actions:
-                # No valid actions left, end the simulation
-                break
+        # Create checkpoint directory if it doesn't exist
+        os.makedirs(CHECKPOINT_DIR, exist_ok=True)
 
-            valid_probs = action_probs[valid_actions]
-            valid_probs /= valid_probs.sum()
-            action = np.random.choice(valid_actions, p=valid_probs)
-            current_env_clone.step(action)
-        return current_env_clone.rewards[current_env_clone.agent_selection] - old_reward
+    def save_checkpoint(self, episode=None):
+        """Save model checkpoint with current episode number"""
+        checkpoint = {
+            'policy_net_state_dict': self.policy_net.state_dict(),
+            'target_net_state_dict': self.target_net.state_dict(),
+            'optimizer_state_dict': self.optimizer.state_dict(),
+            'steps_done': self.steps_done,
+            'episodes_done': self.episodes_done
+        }
 
-    def backpropagate(self, result):
-        self.visits += 1
-        self.value += result
-        if self.parent:
-            self.parent.backpropagate(result)
+        filename = f'checkpoint_episode_{episode if episode else self.episodes_done}.pt'
+        path = os.path.join(CHECKPOINT_DIR, filename)
+        torch.save(checkpoint, path)
 
+    def load_checkpoint(self, checkpoint_path):
+        """Load model checkpoint"""
+        checkpoint = torch.load(checkpoint_path, map_location=self.device)
 
-class G01Agent:
-    def __init__(self, model, env, time_limit=SEARCH_TIME):
-        self.root = MCTSNode(env.observe(env.agent_selection)['observation'], env)
-        self.model = model
-        self.env = env
-        self.time_limit = time_limit
+        self.policy_net.load_state_dict(checkpoint['policy_net_state_dict'])
+        self.target_net.load_state_dict(checkpoint['target_net_state_dict'])
+        self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        self.steps_done = checkpoint['steps_done']
+        self.episodes_done = checkpoint['episodes_done']
 
-    def search(self):
-        end_time = time.time() + self.time_limit
-        result = 0
-        while time.time() < end_time:
-            leaf = self.select()
-            if not is_terminal(leaf.env):
-                child = leaf.expand()
-                if not child:
-                    continue
-                result += child.simulate(self.model)
-            else:
-                win_loss_reward = leaf.env.board_size ** 2 // 2
-                result += win_loss_reward if leaf.env.check_winner(leaf.env.agent_selection) else -win_loss_reward
-            leaf.backpropagate(result)
+    def select_action(self, state, action_mask):
+        sample = random.random()
+        eps_threshold = EPS_END + (EPS_START - EPS_END) * \
+                        math.exp(-1. * self.steps_done / EPS_DECAY)
+        self.steps_done += 1
 
-        return {action: child.visits / self.root.visits for action, child in self.root.children.items()}
-
-    def select(self):
-        node = self.root
-        while node.untried_actions == [] and node.children != {}:
-            node = node.select_child()
-        return node
-
-    def best_action(self):
-        return max(self.root.children.items(), key=lambda x: x[1].visits)[0]
-
-    def get_action(self):
-        pass
+        if sample > eps_threshold:
+            with torch.no_grad():
+                state = torch.FloatTensor(state).unsqueeze(0).to(self.device)
+                q_values = self.policy_net(state)
+                mask = torch.where(
+                    torch.tensor(action_mask, device=self.device) == 1,
+                    torch.zeros_like(q_values),
+                    torch.ones_like(q_values) * float('-inf')
+                )
+                q_values = q_values + mask
+                return q_values.max(1)[1].view(1, 1)
+        else:
+            # Get valid actions from action mask
+            valid_actions = np.where(action_mask == 1)[0]
+            return torch.tensor([[random.choice(valid_actions)]],
+                                device=self.device, dtype=torch.long)
 
 
-def self_play_game(model, env):
-    agent = G01Agent(model, env)
-    states, policies, values = [], [], []
+def optimize_model(agent, batch_size=32, gamma=0.99):
+    if len(agent.memory) < batch_size:
+        return
 
-    while not any(env.terminations.values()):
-        state = env.observe(env.agent_selection)['observation']
-        policy = agent.search()
-        action = max(policy, key=policy.get)
-        states.append(state)
-        policies.append(policy)
-        print(f'chose action {action}', f'board state {state}')
-        env.step(action)
+    transitions = agent.memory.sample(batch_size)
+    batch = Transition(*zip(*transitions))
 
-    if env.check_winner(1):
-        winner = 1
-    elif env.check_winner(2):
-        winner = -1
-    else:
-        winner = 0
+    non_final_mask = torch.tensor(tuple(map(lambda s: s is not None,
+                                            batch.next_state)), device=agent.device, dtype=torch.bool)
 
-    values = [winner if i % 2 == 0 else -winner for i in range(len(states))]
+    state_batch = torch.FloatTensor(np.array(batch.state)).to(agent.device)
+    action_batch = torch.cat(batch.action)
+    reward_batch = torch.cat(batch.reward)  # Now this will work since rewards are tensors
 
-    return states, policies, values
+    state_action_values = agent.policy_net(state_batch).gather(1, action_batch)
 
+    next_state_values = torch.zeros(batch_size, device=agent.device)
+    with torch.no_grad():
+        next_state_batch = torch.FloatTensor(np.array(batch.next_state)).to(agent.device)
+        next_state_values[non_final_mask] = agent.target_net(next_state_batch).max(1)[0]
 
-def train_network(model, optimizer, states, policies, values):
-    criterion = nn.MSELoss()
+    expected_state_action_values = (next_state_values * gamma) + reward_batch
 
-    for state, policy, value in zip(states, policies, values):
-        board = torch.tensor(state).unsqueeze(0).unsqueeze(0).float().cuda()
-        pie_rule = torch.tensor([0]).float().cuda()  # Assuming pie rule is not used, adjust if necessary
+    loss = F.smooth_l1_loss(state_action_values,
+                            expected_state_action_values.unsqueeze(1))
 
-        predicted_policy = model(board, pie_rule)
-
-        policy_loss = criterion(predicted_policy, torch.tensor(list(policy.values())).cuda())
-        value_loss = criterion(predicted_policy.sum(), torch.tensor(value).float().cuda())
-
-        loss = policy_loss + value_loss
-
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
+    agent.optimizer.zero_grad()
+    loss.backward()
+    torch.nn.utils.clip_grad_value_(agent.policy_net.parameters(), 100)
+    agent.optimizer.step()
 
 
-def self_play_training(num_iterations=1000, num_games_per_iteration=100, render='human'):
-    game = OurHexGame(board_size=11, render_mode=render)
-    model = HexCNN().cuda()
-    optimizer = optim.Adam(model.parameters())
+def train_agent(env, agent, num_episodes):
+    for episode in range(num_episodes):
+        env.reset()
+        observation, rewards, terminations, truncations, infos = env.last()
+        total_reward = 0
+        done = False
 
-    for iteration in range(num_iterations):
-        game_data = []
+        while not done:
+            action = agent.select_action(
+                observation['observation'],
+                infos['action_mask']
+            )
+            env.step(action.item())
+            next_observation, rewards, terminations, truncations, infos = env.last()
 
-        for _ in range(num_games_per_iteration):
-            game.reset()
-            states, policies, values = self_play_game(model, game)
-            game_data.extend(zip(states, policies, values))
+            # Convert reward to tensor when pushing to memory
+            reward_tensor = torch.tensor([rewards], device=agent.device)
+            agent.memory.push(
+                observation['observation'],
+                action,
+                next_observation['observation'],
+                reward_tensor,  # Now pushing a tensor instead of int
+                terminations
+            )
 
-        random.shuffle(game_data)
-        train_network(model, optimizer, *zip(*game_data))
+            observation = next_observation
+            total_reward += rewards
+            done = terminations or truncations
 
-        if iteration % 10 == 0:
-            torch.save(model.state_dict(), f'hex_model_iteration_{iteration}.pth')
-            torch.save(optimizer.state_dict(), f'hex_optimizer_iteration_{iteration}.pth')
+            optimize_model(agent, BATCH_SIZE, GAMMA)
 
-    torch.save(model.state_dict(), 'hex_model_final.pth')
-    torch.save(optimizer.state_dict(), 'hex_optimizer_final.pth')
+            if agent.steps_done % TARGET_UPDATE_FREQ == 0:
+                agent.target_net.load_state_dict(agent.policy_net.state_dict())
+
+        agent.episodes_done += 1
+        if episode % CHECKPOINT_FREQ == 0:
+            agent.save_checkpoint()
+
+    agent.save_checkpoint()
 
 
-# Run the training
-self_play_training(2, 5, 'human')
+if __name__ == '__main__':
+    env = OurHexGame(11, False, "human")
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    agent = HexAgent(11, device)
+    train_agent(env, agent, num_episodes=64)
