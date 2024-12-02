@@ -32,10 +32,9 @@ class G01Agent():
         self._former_pie_rule_state_P = 0
         self._former_board_state_S = None
         self._former_action_A = None
+        self._initial_state = True
 
-    def set_set_epsilon(self, epsilon: float):
-        self._epsilon = epsilon
-        pass
+        self._actions_taken = 0
 
     def select_action(self, env_observation, env_reward, env_termination, env_truncation, env_info):
         if self._agent_selector == 0:
@@ -54,7 +53,7 @@ class G01Agent():
         if Q_key in self._Q_value_table.keys():
             self._Q_value_table[Q_key][A] = value
         else:
-            self._Q_value_table[Q_key] = {A: value}
+            self._Q_value_table[Q_key] = {A: float(value)}
         pass
 
     def read_Q_value_table(self, S, P, A) -> float:
@@ -63,12 +62,12 @@ class G01Agent():
             if A in self._Q_value_table[Q_key].keys():
                 ret_val = self._Q_value_table[Q_key][A]
             else:
-                ret_val = 0
+                ret_val = 0.0
         else:
-            ret_val = 0
+            ret_val = 0.0
         return ret_val
 
-    def convert_board_array_to_key(self, S: list[list[int]], P: int) -> str:
+    def convert_board_array_to_key(self, S, P: int) -> str:
         key_str = ""
         i = 0
         while i < len(S):
@@ -80,7 +79,7 @@ class G01Agent():
         key_str += str(P)
         return key_str
 
-    def get_all_possible_actions(self, S: array[list[int]], P: int) -> list[int]:
+    def get_all_possible_actions(self, S, P: int) -> list[int]:
         possible_actions_list = []
         action_value = 0
         i = 0
@@ -92,7 +91,7 @@ class G01Agent():
                 j += 1
                 action_value += 1
             i += 1
-        if P == 0:
+        if (P == 0) and (self._actions_taken == 0):
             possible_actions_list.append(action_value)
         return possible_actions_list
 
@@ -102,7 +101,7 @@ class G01Agent():
             Q_values_list.append(self.read_Q_value_table(S, P, a))
         return Q_values_list
 
-    def get_epsilon_greedy_action(self, S: array[list[int]], P: int) -> int:
+    def get_epsilon_greedy_action(self, S, P: int) -> int:
         possible_action_list = self.get_all_possible_actions(S, P)
         possible_action_Q_values_list = self.get_all_Q_values_of_actions(S, P,  possible_action_list)
 
@@ -138,17 +137,18 @@ class G01Agent():
                     move_choice = random.randint(0, self._board_size)
         else:
             move_choice = None
+        self._actions_taken += 1
         return move_choice
 
-    def get_board_state_from_env_obs(self, env_observation: dict) -> array[list[int]]:
+    def get_board_state_from_env_obs(self, env_observation):
         board_state_array = env_observation["observation"]
         return (copy.deepcopy(board_state_array))
 
-    def get_pie_rule_state_from_env_obs(self, env_observation: dict) -> int:
+    def get_pie_rule_state_from_env_obs(self, env_observation) -> int:
         ret_val = env_observation["pie_rule_used"]
         return ret_val
 
-    def max_Q_action(self, S: array[list[int]], P: int) -> float:
+    def max_Q_action(self, S, P: int) -> int:
         possible_action_list = self.get_all_possible_actions(S, P)
         max_Q_value = -130
         max_a = 0
@@ -159,32 +159,26 @@ class G01Agent():
                 max_a = a
         return max_a
 
-
-
-    def select_action_basic_agent(self, env_observation, env_reward: float, env_termination, env_truncation, env_info) -> int:
-        # if S == None, so initial state then just save it as former state S
-        # Get action via epsilon greedy and store it as former action A
-        # no need to update Q
-        # if S != None, then record reward as R and new state as S'
-        # update Q-values
-        # S = S'
-        # A = chosen by epsilon greedy
-        if self._former_board_state_S == None:
+    def select_action_basic_agent(self, env_observation, env_reward, env_termination, env_truncation, env_info) -> int:
+        if self._initial_state == True:
             self._former_board_state_S = self.get_board_state_from_env_obs(env_observation)
             self._former_pie_rule_state_P = self.get_pie_rule_state_from_env_obs(env_observation)
+            self._initial_state = False
+            self.load_past_experience()
         else:
-            self._former_reward_R = env_reward
+            self._former_reward_R = float(env_reward)
             current_board_state_S_prime = self.get_board_state_from_env_obs(env_observation)
             current_pie_state_P_prime = self.get_pie_rule_state_from_env_obs(env_observation)
             Q_S_A = self.read_Q_value_table(self._former_board_state_S, self._former_pie_rule_state_P, self._former_action_A)
             max_a = self.max_Q_action(current_board_state_S_prime, current_pie_state_P_prime)
             max_a_Q_S_prime_a = self.read_Q_value_table(self._former_board_state_S, self._former_pie_rule_state_P, max_a)
-            new_Q_S_A = Q_S_A + self._alpha * [self._former_reward_R + self._gamma * max_a_Q_S_prime_a - Q_S_A]
+            new_Q_S_A = Q_S_A + self._alpha * (self._former_reward_R + self._gamma * max_a_Q_S_prime_a - Q_S_A)
             self.update_Q_value_table(self._former_board_state_S, self._former_pie_rule_state_P, self._former_action_A, new_Q_S_A)
             self._former_board_state_S = current_board_state_S_prime
             self._former_pie_rule_state_P = current_pie_state_P_prime
 
         self._former_action_A = self.get_epsilon_greedy_action(self._former_board_state_S, self._former_pie_rule_state_P)
+        self._actions_taken += 1
         return(self._former_action_A)
 
     def load_past_experience(self) -> bool:
@@ -201,7 +195,7 @@ class G01Agent():
         return ret_val
 
     def store_past_experience(self):
-        json_object = json.dumps(self._Q_value_table)
+        json_object = json.dumps(self._Q_value_table, indent = 4)
         with open("./basic_agent_experience_01.json", "w") as outfile:
             outfile.write(json_object)
         pass
