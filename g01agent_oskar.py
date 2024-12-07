@@ -158,6 +158,7 @@ class G01Agent:
         self.episodes_done = checkpoint['episodes_done']
         self.action_counts = checkpoint['action_counts']
 
+    # this is a hidden helper function because i am using this for training and the actual select_action for use in the competition
     def _select_action(self, state, action_mask):
         with torch.no_grad():
             state = torch.FloatTensor(state).unsqueeze(0).to(self.device)
@@ -198,40 +199,52 @@ class G01Agent:
         return self._select_action(board, action_mask)
 
 
-def optimize_model(agent, batch_size=32, gamma=0.99):
+def optimize_model(agent, batch_size=BATCH_SIZE, gamma=GAMMA):
+    # Skip if we don't have enough samples in memory
     if len(agent.memory) < batch_size:
         return
 
+    # Sample a batch of transitions from memory
     transitions = agent.memory.sample(batch_size)
+    # Transpose the batch (see https://stackoverflow.com/a/19343/3343043)
     batch = Transition(*zip(*transitions))
 
+    # Create mask for non-final states (where next_state is not None)
     non_final_mask = torch.tensor(tuple(map(lambda s: s is not None,
-                                            batch.next_state)), device=agent.device, dtype=torch.bool)
+                                          batch.next_state)), device=agent.device, dtype=torch.bool)
 
+    # Convert batch arrays to tensors and move to device
     state_batch = torch.FloatTensor(np.array(batch.state)).to(agent.device)
     action_batch = torch.cat(batch.action)
     reward_batch = torch.cat(batch.reward)
 
+    # Compute Q(s_t, a) - the model computes Q(s_t), then we select the columns of actions taken
     state_action_values = agent.policy_net(state_batch).gather(1, action_batch)
 
+    # Compute V(s_{t+1}) for all next states
     next_state_values = torch.zeros(batch_size, device=agent.device)
-    with torch.no_grad():
+    with torch.no_grad():  # No need to compute gradients for next state values
         next_state_batch = torch.FloatTensor(np.array(batch.next_state)).to(agent.device)
+        # Get max predicted Q values for next states from target network
         next_state_values[non_final_mask] = agent.target_net(next_state_batch).max(1)[0]
 
+    # Compute the expected Q values: reward + gamma * max(Q(s_{t+1}))
     expected_state_action_values = (next_state_values * gamma) + reward_batch
 
+    # Compute Huber loss between current Q values and expected Q values
     loss = F.smooth_l1_loss(state_action_values,
-                            expected_state_action_values.unsqueeze(1))
+                           expected_state_action_values.unsqueeze(1))
 
-    agent.optimizer.zero_grad()
-    loss.backward()
-    torch.nn.utils.clip_grad_value_(agent.policy_net.parameters(), 100)
-    agent.optimizer.step()
+    # Optimize the model
+    agent.optimizer.zero_grad()  # Clear previous gradients
+    loss.backward()  # Compute gradients
+    torch.nn.utils.clip_grad_value_(agent.policy_net.parameters(), 100)  # Clip gradients to prevent explosion
+    agent.optimizer.step()  # Update weights
 
 
 def train_agent(env, agent, num_episodes):
     for episode in range(num_episodes):
+        # Reset environment at start of episode
         env.reset()
         observation, rewards, terminations, truncations, infos = env.last()
         total_reward = 0
@@ -239,6 +252,7 @@ def train_agent(env, agent, num_episodes):
         print(f"Completed episode {episode}/{num_episodes}")
 
         while not done:
+            # Select and perform an action
             action = agent.select_action(
                 observation['observation'],
                 infos['action_mask']
@@ -246,7 +260,7 @@ def train_agent(env, agent, num_episodes):
             env.step(action.item())
             next_observation, rewards, terminations, truncations, infos = env.last()
 
-            # Convert reward to tensor when pushing to memory
+            # Store transition in memory
             reward_tensor = torch.tensor([rewards], device=agent.device)
             agent.memory.push(
                 observation['observation'],
@@ -256,19 +270,24 @@ def train_agent(env, agent, num_episodes):
                 terminations
             )
 
+            # Move to next state
             observation = next_observation
             total_reward += rewards
             done = terminations or truncations
 
+            # Perform one step of optimization
             optimize_model(agent, BATCH_SIZE, GAMMA)
 
+            # Update target network periodically
             if agent.steps_done % TARGET_UPDATE_FREQ == 0:
                 agent.target_net.load_state_dict(agent.policy_net.state_dict())
 
+        # Episode complete
         agent.episodes_done += 1
         if episode % CHECKPOINT_FREQ == 0:
             agent.save_checkpoint()
 
+    # Save final model
     agent.save_checkpoint()
 
 
