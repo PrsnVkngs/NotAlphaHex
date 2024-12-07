@@ -1,10 +1,12 @@
 from ourhexenv import OurHexGame
-from g01agent_oskar import G01Agent
+from g01agent import G01Agent
 from g99agent import G99Agent
 import random
 
 env = OurHexGame(board_size=11)
 env.reset()
+
+sparse_flag = False
 
 # player 1
 g01agent = G01Agent(env)
